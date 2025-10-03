@@ -1,77 +1,114 @@
 package com.example.smartglassesai
 
-import android.app.Activity
-import android.content.Intent
-import android.graphics.Bitmap
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.*
 import android.os.Bundle
-import android.provider.MediaStore
+import android.speech.tts.TextToSpeech
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import android.speech.tts.TextToSpeech
+import java.io.ByteArrayOutputStream
 import java.util.*
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
-    private lateinit var tts: TextToSpeech
+
+    private lateinit var previewView: PreviewView
     private lateinit var statusText: TextView
     private lateinit var startButton: Button
-    private val CAMERA_REQUEST_CODE = 100
+    private lateinit var imageCapture: ImageCapture
+    private lateinit var cameraExecutor: ExecutorService
+    private lateinit var tts: TextToSpeech
+
+    companion object {
+        private const val CAMERA_PERMISSION_CODE = 10
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        previewView = findViewById(R.id.previewView)
         statusText = findViewById(R.id.statusText)
         startButton = findViewById(R.id.startButton)
 
-        // Init TTS once
         tts = TextToSpeech(this, this)
+        cameraExecutor = Executors.newSingleThreadExecutor()
 
-        // Button → open camera
+        // Ask for camera permission
+        if (allPermissionsGranted()) {
+            startCamera()
+        } else {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_CODE
+            )
+        }
+
+        // Capture image when button pressed
         startButton.setOnClickListener {
-            val cameraIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-            if (cameraIntent.resolveActivity(packageManager) != null) {
-                startActivityForResult(cameraIntent, CAMERA_REQUEST_CODE)
-            } else {
-                statusText.text = "Camera not available"
+            takePhoto()
+        }
+    }
+
+    private fun startCamera() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+
+        cameraProviderFuture.addListener({
+            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
+
+            // Preview
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
             }
-        }
-    }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val result = tts.setLanguage(Locale.US)
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                statusText.text = "TTS language not supported"
+            // Image capture
+            imageCapture = ImageCapture.Builder().build()
+
+            // Select back camera
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(
+                    this, cameraSelector, preview, imageCapture
+                )
+            } catch (exc: Exception) {
+                statusText.text = "Camera init failed: ${exc.message}"
             }
-        }
+
+        }, ContextCompat.getMainExecutor(this))
     }
 
-    //makes sure that the tts isn't dead
-    private fun speakText(text: String) {
-        if (::tts.isInitialized) {
-            tts.stop() // stop any ongoing speech
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "tts1")
-        }
-    }
+    private fun takePhoto() {
+        val imageCapture = imageCapture ?: return
 
+        imageCapture.takePicture(
+            ContextCompat.getMainExecutor(this),
+            object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(imageProxy: ImageProxy) {
+                    val bitmap = imageProxy.toBitmap()
+                    runTextRecognition(bitmap)
+                    imageProxy.close()
+                }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-
-        if (requestCode == CAMERA_REQUEST_CODE && resultCode == Activity.RESULT_OK) {
-            val photo = data?.extras?.get("data") as? Bitmap
-            if (photo != null) {
-                runTextRecognition(photo)
-            } else {
-                statusText.text = "Error: No photo captured"
+                override fun onError(exception: ImageCaptureException) {
+                    statusText.text = "Capture failed: ${exception.message}"
+                }
             }
-        }
+        )
     }
 
+    // OCR with ML Kit
     private fun runTextRecognition(bitmap: Bitmap) {
         val image = InputImage.fromBitmap(bitmap, 0)
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -87,11 +124,64 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
     }
 
+    // TTS
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            val result = tts.setLanguage(Locale.US)
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                statusText.text = "TTS language not supported"
+            }
+        }
+    }
+
+    private fun speakText(text: String) {
+        if (::tts.isInitialized) {
+            val chunks = text.chunked(3000)
+            for (chunk in chunks) {
+                tts.speak(chunk, TextToSpeech.QUEUE_ADD, null, UUID.randomUUID().toString())
+            }
+        }
+    }
+
     override fun onDestroy() {
+        super.onDestroy()
         if (::tts.isInitialized) {
             tts.stop()
             tts.shutdown()
         }
-        super.onDestroy()
+        cameraExecutor.shutdown()
     }
+
+    private fun allPermissionsGranted() =
+        ContextCompat.checkSelfPermission(
+            baseContext, Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+}
+
+// Extension function to convert ImageProxy → Bitmap
+fun ImageProxy.toBitmap(): Bitmap {
+    val nv21 = yuv420888ToNv21(this)
+    val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+    val out = ByteArrayOutputStream()
+    yuvImage.compressToJpeg(Rect(0, 0, width, height), 100, out)
+    val imageBytes = out.toByteArray()
+    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+}
+
+private fun yuv420888ToNv21(image: ImageProxy): ByteArray {
+    val yBuffer = image.planes[0].buffer
+    val uBuffer = image.planes[1].buffer
+    val vBuffer = image.planes[2].buffer
+
+    val ySize = yBuffer.remaining()
+    val uSize = uBuffer.remaining()
+    val vSize = vBuffer.remaining()
+
+    val nv21 = ByteArray(ySize + uSize + vSize)
+
+    yBuffer.get(nv21, 0, ySize)
+    vBuffer.get(nv21, ySize, vSize)
+    uBuffer.get(nv21, ySize + vSize, uSize)
+
+    return nv21
 }

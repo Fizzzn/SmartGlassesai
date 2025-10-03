@@ -36,7 +36,13 @@ android {
 }
 
 dependencies {
+    val camerax = "1.3.4"
+    implementation("androidx.camera:camera-core:$camerax")
+    implementation("androidx.camera:camera-camera2:$camerax")
+    implementation("androidx.camera:camera-lifecycle:$camerax")
+    implementation("androidx.camera:camera-view:$camerax") // PreviewView widget
     implementation("com.google.mlkit:text-recognition:16.0.0")
+    implementation("androidx.camera:camera-extensions:${camerax}")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
