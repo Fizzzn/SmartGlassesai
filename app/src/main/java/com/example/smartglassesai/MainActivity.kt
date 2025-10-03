@@ -20,6 +20,12 @@ import java.io.ByteArrayOutputStream
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import com.google.ai.client.generativeai.GenerativeModel
+
+import com.google.ai.client.generativeai.type.listModels
+import com.google.ai.client.generativeai.type.supportedGenerationMethods
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -30,6 +36,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var tts: TextToSpeech
 
+    private val generativeModel by lazy {
+        GenerativeModel(
+            modelName = "gemini-pro",
+            apiKey = BuildConfig.GEMINI_API_KEY
+        )
+    }
     companion object {
         private const val CAMERA_PERMISSION_CODE = 10
     }
@@ -44,6 +56,27 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         tts = TextToSpeech(this, this)
         cameraExecutor = Executors.newSingleThreadExecutor()
+
+        // --- TEMPORARY CODE TO LIST MODELS ---
+        statusText.text = "Checking available AI models..."
+        lifecycleScope.launch {
+            try {
+                val models = listModels() // This is the key function
+                val modelNames = models.joinToString("\n") { model ->
+                    // Look for models that support 'generateContent'
+                    if (supportedGenerationMethods.contains("generateContent")) {
+                        model.name
+                    } else {
+                        // Optional: show models that don't support it
+                        "${model.name} (unsupported)"
+                    }
+                }
+                statusText.text = "Available Models:\n$modelNames"
+            } catch (e: Exception) {
+                statusText.text = "Could not list models: ${e.localizedMessage}"
+            }
+        }
+        // --- END OF TEMPORARY CODE ---
 
         // Ask for camera permission
         if (allPermissionsGranted()) {
@@ -109,20 +142,57 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     // OCR with ML Kit
+    // OCR with ML Kit and Gemini Integration
     private fun runTextRecognition(bitmap: Bitmap) {
         val image = InputImage.fromBitmap(bitmap, 0)
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
         recognizer.process(image)
             .addOnSuccessListener { visionText ->
-                val textFound = visionText.text.ifEmpty { "No text found" }
-                statusText.text = textFound
-                speakText(textFound)
+                val recognizedText = visionText.text
+                if (recognizedText.isNotBlank()) {
+                    // Text was found, now send it to Gemini
+                    statusText.text = "Recognized text. Thinking..." // Update UI
+
+                    // Use a coroutine to call the Gemini API off the main thread
+                    lifecycleScope.launch {
+                        try {
+                            // --- This is where you prompt Gemini ---
+                            // You can change the prompt to do different things!
+                            // Example 1: Summarize the text
+                            val prompt = "Please summarize the following text in a concise way: $recognizedText"
+
+                            // Example 2: Explain the text like you're talking to a friend
+                            // val prompt = "Explain what this means in simple, friendly terms: $recognizedText"
+
+                            // Generate the content
+                            val response = generativeModel.generateContent(prompt)
+
+                            // Get the AI's response and speak it
+                            val aiResponse = response.text ?: "I understood the text, but couldn't process it."
+                            statusText.text = aiResponse // Display AI response
+                            speakText(aiResponse)
+
+                        } catch (e: Exception) {
+                            // Handle potential API errors (e.g., no internet)
+                            val errorMessage = "AI Error: ${e.localizedMessage}"
+                            statusText.text = errorMessage
+                            // Fallback: just read the original text if the AI fails
+                            speakText("I couldn't connect to the AI, so here is the raw text: $recognizedText")
+                        }
+                    }
+                } else {
+                    // No text was found in the image
+                    val textFound = "No text found"
+                    statusText.text = textFound
+                    speakText(textFound)
+                }
             }
             .addOnFailureListener { e ->
-                statusText.text = "Error: ${e.message}"
+                statusText.text = "OCR Error: ${e.message}"
             }
     }
+
 
     // TTS
     override fun onInit(status: Int) {
