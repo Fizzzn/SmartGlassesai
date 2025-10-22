@@ -13,19 +13,16 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.google.ai.client.generativeai.GenerativeModel
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import com.google.ai.client.generativeai.GenerativeModel
-
-import com.google.ai.client.generativeai.type.listModels
-import com.google.ai.client.generativeai.type.supportedGenerationMethods
-import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -42,6 +39,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             apiKey = BuildConfig.GEMINI_API_KEY
         )
     }
+
     companion object {
         private const val CAMERA_PERMISSION_CODE = 10
     }
@@ -57,27 +55,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts = TextToSpeech(this, this)
         cameraExecutor = Executors.newSingleThreadExecutor()
 
-        // --- TEMPORARY CODE TO LIST MODELS ---
-        statusText.text = "Checking available AI models..."
-        lifecycleScope.launch {
-            try {
-                val models = listModels() // This is the key function
-                val modelNames = models.joinToString("\n") { model ->
-                    // Look for models that support 'generateContent'
-                    if (supportedGenerationMethods.contains("generateContent")) {
-                        model.name
-                    } else {
-                        // Optional: show models that don't support it
-                        "${model.name} (unsupported)"
-                    }
-                }
-                statusText.text = "Available Models:\n$modelNames"
-            } catch (e: Exception) {
-                statusText.text = "Could not list models: ${e.localizedMessage}"
-            }
-        }
-        // --- END OF TEMPORARY CODE ---
-
         // Ask for camera permission
         if (allPermissionsGranted()) {
             startCamera()
@@ -88,9 +65,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         // Capture image when button pressed
-        startButton.setOnClickListener {
-            takePhoto()
-        }
+        startButton.setOnClickListener { takePhoto() }
     }
 
     private fun startCamera() {
@@ -99,15 +74,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         cameraProviderFuture.addListener({
             val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
 
-            // Preview
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
-            // Image capture
             imageCapture = ImageCapture.Builder().build()
 
-            // Select back camera
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
             try {
@@ -115,6 +87,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 cameraProvider.bindToLifecycle(
                     this, cameraSelector, preview, imageCapture
                 )
+                statusText.text = "Camera ready"
             } catch (exc: Exception) {
                 statusText.text = "Camera init failed: ${exc.message}"
             }
@@ -123,15 +96,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun takePhoto() {
-        val imageCapture = imageCapture ?: return
+        if (!::imageCapture.isInitialized) {
+            statusText.text = "Camera not ready yet"
+            return
+        }
 
         imageCapture.takePicture(
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(imageProxy: ImageProxy) {
                     val bitmap = imageProxy.toBitmap()
-                    runTextRecognition(bitmap)
                     imageProxy.close()
+                    runTextRecognition(bitmap)
                 }
 
                 override fun onError(exception: ImageCaptureException) {
@@ -141,8 +117,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         )
     }
 
-    // OCR with ML Kit
-    // OCR with ML Kit and Gemini Integration
+    // OCR with ML Kit + Gemini
     private fun runTextRecognition(bitmap: Bitmap) {
         val image = InputImage.fromBitmap(bitmap, 0)
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -151,38 +126,24 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .addOnSuccessListener { visionText ->
                 val recognizedText = visionText.text
                 if (recognizedText.isNotBlank()) {
-                    // Text was found, now send it to Gemini
-                    statusText.text = "Recognized text. Thinking..." // Update UI
+                    statusText.text = "Recognized text. Thinking…"
 
-                    // Use a coroutine to call the Gemini API off the main thread
                     lifecycleScope.launch {
                         try {
-                            // --- This is where you prompt Gemini ---
-                            // You can change the prompt to do different things!
-                            // Example 1: Summarize the text
-                            val prompt = "Please summarize the following text in a concise way: $recognizedText"
+                            val prompt =
+                                "Please summarize the following text in a concise way: $recognizedText"
 
-                            // Example 2: Explain the text like you're talking to a friend
-                            // val prompt = "Explain what this means in simple, friendly terms: $recognizedText"
-
-                            // Generate the content
                             val response = generativeModel.generateContent(prompt)
-
-                            // Get the AI's response and speak it
-                            val aiResponse = response.text ?: "I understood the text, but couldn't process it."
-                            statusText.text = aiResponse // Display AI response
+                            val aiResponse = response.text
+                                ?: "I understood the text, but couldn't process it."
+                            statusText.text = aiResponse
                             speakText(aiResponse)
-
                         } catch (e: Exception) {
-                            // Handle potential API errors (e.g., no internet)
-                            val errorMessage = "AI Error: ${e.localizedMessage}"
-                            statusText.text = errorMessage
-                            // Fallback: just read the original text if the AI fails
-                            speakText("I couldn't connect to the AI, so here is the raw text: $recognizedText")
+                            statusText.text = "AI Error: ${e.localizedMessage}"
+                            speakText("I couldn't connect to the AI, so here's the raw text: $recognizedText")
                         }
                     }
                 } else {
-                    // No text was found in the image
                     val textFound = "No text found"
                     statusText.text = textFound
                     speakText(textFound)
@@ -192,7 +153,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 statusText.text = "OCR Error: ${e.message}"
             }
     }
-
 
     // TTS
     override fun onInit(status: Int) {
@@ -228,7 +188,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         ) == PackageManager.PERMISSION_GRANTED
 }
 
-// Extension function to convert ImageProxy → Bitmap
+// ImageProxy → Bitmap
 fun ImageProxy.toBitmap(): Bitmap {
     val nv21 = yuv420888ToNv21(this)
     val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
@@ -248,10 +208,8 @@ private fun yuv420888ToNv21(image: ImageProxy): ByteArray {
     val vSize = vBuffer.remaining()
 
     val nv21 = ByteArray(ySize + uSize + vSize)
-
     yBuffer.get(nv21, 0, ySize)
     vBuffer.get(nv21, ySize, vSize)
     uBuffer.get(nv21, ySize + vSize, uSize)
-
     return nv21
 }
