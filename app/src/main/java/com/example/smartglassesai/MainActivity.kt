@@ -23,6 +23,8 @@ import java.io.ByteArrayOutputStream
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import android.os.Build
+import android.widget.Toast
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -42,6 +44,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     companion object {
         private const val CAMERA_PERMISSION_CODE = 10
+        private const val REQ_BLE_PERMS = 42
+
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -115,6 +119,58 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
             }
         )
+    }
+    /** Ask for the right set of BLE permissions depending on Android version. */
+    private fun ensureBlePermissions(onGranted: () -> Unit) {
+        val needed = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) { // API 31+
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
+                != PackageManager.PERMISSION_GRANTED
+            ) needed += Manifest.permission.BLUETOOTH_SCAN
+
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED
+            ) needed += Manifest.permission.BLUETOOTH_CONNECT
+        } else {
+            // Pre-Android 12: location perms required to scan BLE
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED
+            ) needed += Manifest.permission.ACCESS_FINE_LOCATION
+
+            if (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED
+            ) needed += Manifest.permission.ACCESS_COARSE_LOCATION
+        }
+
+        if (needed.isEmpty()) {
+            onGranted()
+        } else {
+            requestPermissions(needed.toTypedArray(), REQ_BLE_PERMS)
+        }
+    }
+
+    /** Handle the result of the runtime permission request. */
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_BLE_PERMS) {
+            val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (allGranted) {
+                startBleScanOrConnect()
+            } else {
+                Toast.makeText(this, "Bluetooth permissions are required.", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    /** Stub you can fill in with your actual BLE scan/connect to ESP32. */
+    private fun startBleScanOrConnect() {
+        // TODO: Start scanning for "SmartGlassesESP" and connect here.
+        // This is just a placeholder so the permission flow compiles.
+        statusText.text = "BLE ready (permissions granted)."
     }
 
     // OCR with ML Kit + Gemini
