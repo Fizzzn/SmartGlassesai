@@ -1,271 +1,220 @@
 package com.example.smartglassesai
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.graphics.*
+import android.app.AlertDialog
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.widget.Button
+import android.widget.EditText
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.core.*
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.ai.client.generativeai.GenerativeModel
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.io.ByteArrayOutputStream
-import java.util.*
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import android.os.Build
-import android.widget.Toast
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
-    private lateinit var previewView: PreviewView
+    private lateinit var espImage: ImageView
     private lateinit var statusText: TextView
-    private lateinit var startButton: Button
-    private lateinit var imageCapture: ImageCapture
-    private lateinit var cameraExecutor: ExecutorService
+    private lateinit var btnEspCapture: Button
     private lateinit var tts: TextToSpeech
+
+    // NEW: longer timeouts + clearer failure messages
+    private val httpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .callTimeout(25, TimeUnit.SECONDS)
+            .build()
+    }
+
+    // NEW: editable base URL (tap statusText to change; persisted)
+    private var ESP_BASE = "http://192.168.1.89"  // set your ESP IP here initially
 
     private val generativeModel by lazy {
         GenerativeModel(
-            modelName = "gemini-pro",
+            modelName = "gemini-2.5-flash",
             apiKey = BuildConfig.GEMINI_API_KEY
         )
-    }
-
-    companion object {
-        private const val CAMERA_PERMISSION_CODE = 10
-        private const val REQ_BLE_PERMS = 42
-
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        previewView = findViewById(R.id.previewView)
+        espImage = findViewById(R.id.espImage)
         statusText = findViewById(R.id.statusText)
-        startButton = findViewById(R.id.startButton)
+        btnEspCapture = findViewById(R.id.btnEspCapture)
+
+        // NEW: load & edit ESP base URL
+        val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+        ESP_BASE = prefs.getString("esp_base", ESP_BASE)!!
+
+        statusText.setOnClickListener {
+            val input = EditText(this).apply { setText(ESP_BASE) }
+            AlertDialog.Builder(this)
+                .setTitle("Set ESP Base URL")
+                .setMessage("Example: http://192.168.1.89")
+                .setView(input)
+                .setPositiveButton("Save") { _, _ ->
+                    ESP_BASE = input.text.toString().trim()
+                    prefs.edit().putString("esp_base", ESP_BASE).apply()
+                    statusText.text = "ESP set to $ESP_BASE"
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        // NEW: long-press to probe /net (quick reachability test)
+        statusText.setOnLongClickListener {
+            probeEsp()
+            true
+        }
 
         tts = TextToSpeech(this, this)
-        cameraExecutor = Executors.newSingleThreadExecutor()
+        statusText.text = "Ready. Tap Capture."
 
-        // Ask for camera permission
-        if (allPermissionsGranted()) {
-            startCamera()
-        } else {
-            ActivityCompat.requestPermissions(
-                this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_CODE
-            )
-        }
-
-        // Capture image when button pressed
-        startButton.setOnClickListener { takePhoto() }
+        btnEspCapture.setOnClickListener { captureFromEspAndOcr() }
     }
 
-    private fun startCamera() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-
-        cameraProviderFuture.addListener({
-            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
-
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
-            }
-
-            imageCapture = ImageCapture.Builder().build()
-
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
-                    this, cameraSelector, preview, imageCapture
-                )
-                statusText.text = "Camera ready"
-            } catch (exc: Exception) {
-                statusText.text = "Camera init failed: ${exc.message}"
-            }
-
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun takePhoto() {
-        if (!::imageCapture.isInitialized) {
-            statusText.text = "Camera not ready yet"
-            return
-        }
-
-        imageCapture.takePicture(
-            ContextCompat.getMainExecutor(this),
-            object : ImageCapture.OnImageCapturedCallback() {
-                override fun onCaptureSuccess(imageProxy: ImageProxy) {
-                    val bitmap = imageProxy.toBitmap()
-                    imageProxy.close()
-                    runTextRecognition(bitmap)
-                }
-
-                override fun onError(exception: ImageCaptureException) {
-                    statusText.text = "Capture failed: ${exception.message}"
+    // NEW: /net probe with surfaced errors
+    private fun probeEsp() {
+        lifecycleScope.launch {
+            statusText.text = "Probing $ESP_BASE/net …"
+            val msg = withContext(Dispatchers.IO) {
+                try {
+                    val r = Request.Builder()
+                        .url("$ESP_BASE/net")
+                        .header("Cache-Control", "no-cache")
+                        .build()
+                    httpClient.newCall(r).execute().use { resp ->
+                        if (!resp.isSuccessful) "HTTP ${resp.code} from /net"
+                        else resp.body?.string() ?: "Empty /net body"
+                    }
+                } catch (e: Exception) {
+                    "Network error: ${e.localizedMessage}"
                 }
             }
-        )
-    }
-    /** Ask for the right set of BLE permissions depending on Android version. */
-    private fun ensureBlePermissions(onGranted: () -> Unit) {
-        val needed = mutableListOf<String>()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) { // API 31+
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
-                != PackageManager.PERMISSION_GRANTED
-            ) needed += Manifest.permission.BLUETOOTH_SCAN
-
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                != PackageManager.PERMISSION_GRANTED
-            ) needed += Manifest.permission.BLUETOOTH_CONNECT
-        } else {
-            // Pre-Android 12: location perms required to scan BLE
-            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED
-            ) needed += Manifest.permission.ACCESS_FINE_LOCATION
-
-            if (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED
-            ) needed += Manifest.permission.ACCESS_COARSE_LOCATION
-        }
-
-        if (needed.isEmpty()) {
-            onGranted()
-        } else {
-            requestPermissions(needed.toTypedArray(), REQ_BLE_PERMS)
+            statusText.text = msg
         }
     }
 
-    /** Handle the result of the runtime permission request. */
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQ_BLE_PERMS) {
-            val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
-            if (allGranted) {
-                startBleScanOrConnect()
-            } else {
-                Toast.makeText(this, "Bluetooth permissions are required.", Toast.LENGTH_SHORT).show()
+    private fun captureFromEspAndOcr() {
+        val url = "$ESP_BASE/capture"
+        statusText.text = "GET $url …"
+        lifecycleScope.launch {
+            val bmp = fetchEspJpeg(url)
+            if (bmp == null) {
+                statusText.text = "Capture failed (check IP, same Wi-Fi, /capture)"
+                return@launch
             }
+            espImage.setImageBitmap(bmp)
+            statusText.text = "Running OCR…"
+            runTextRecognition(bmp)
         }
     }
 
-    /** Stub you can fill in with your actual BLE scan/connect to ESP32. */
-    private fun startBleScanOrConnect() {
-        // TODO: Start scanning for "SmartGlassesESP" and connect here.
-        // This is just a placeholder so the permission flow compiles.
-        statusText.text = "BLE ready (permissions granted)."
+    // NEW: clearer error reporting in fetch
+    private suspend fun fetchEspJpeg(url: String): Bitmap? = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url(url)
+                .header("Cache-Control", "no-cache")
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    withContext(Dispatchers.Main) {
+                        statusText.text = "HTTP ${resp.code} from /capture"
+                    }
+                    return@withContext null
+                }
+                val bytes = resp.body?.bytes()
+                if (bytes == null || bytes.isEmpty()) {
+                    withContext(Dispatchers.Main) { statusText.text = "Empty body from /capture" }
+                    return@withContext null
+                }
+                return@withContext BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    ?: run {
+                        withContext(Dispatchers.Main) { statusText.text = "Decode error (JPEG)" }
+                        null
+                    }
+            }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) { statusText.text = "Network error: ${e.localizedMessage}" }
+            null
+        }
     }
 
-    // OCR with ML Kit + Gemini
     private fun runTextRecognition(bitmap: Bitmap) {
         val image = InputImage.fromBitmap(bitmap, 0)
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
         recognizer.process(image)
             .addOnSuccessListener { visionText ->
-                val recognizedText = visionText.text
-                if (recognizedText.isNotBlank()) {
-                    statusText.text = "Recognized text. Thinking…"
+                val recognized = visionText.text.trim()
+                if (recognized.isEmpty()) {
+                    val msg = "No text found"
+                    statusText.text = msg
+                    speakText(msg)
+                    return@addOnSuccessListener
+                }
 
-                    lifecycleScope.launch {
-                        try {
-                            val prompt =
-                                "Please summarize the following text in a concise way: $recognizedText"
-
-                            val response = generativeModel.generateContent(prompt)
-                            val aiResponse = response.text
-                                ?: "I understood the text, but couldn't process it."
-                            statusText.text = aiResponse
-                            speakText(aiResponse)
-                        } catch (e: Exception) {
-                            statusText.text = "AI Error: ${e.localizedMessage}"
-                            speakText("I couldn't connect to the AI, so here's the raw text: $recognizedText")
-                        }
+                // Gemini optional: falls back to raw OCR if key missing/offline
+                lifecycleScope.launch {
+                    if (BuildConfig.GEMINI_API_KEY.isBlank()) {
+                        statusText.text = recognized
+                        speakText(recognized)
+                        return@launch
                     }
-                } else {
-                    val textFound = "No text found"
-                    statusText.text = textFound
-                    speakText(textFound)
+                    try {
+                        statusText.text = "Summarizing…"
+                        val prompt = "Summarize or translate if needed: \"$recognized\""
+                        val resp = generativeModel.generateContent(prompt)
+                        val ai = resp.text ?: recognized
+                        statusText.text = ai
+                        speakText(ai)
+                    } catch (_: Exception) {
+                        statusText.text = "AI offline. Reading OCR."
+                        speakText(recognized)
+                    }
                 }
             }
             .addOnFailureListener { e ->
-                statusText.text = "OCR Error: ${e.message}"
+                statusText.text = "OCR Error: ${e.localizedMessage}"
             }
     }
 
-    // TTS
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            val result = tts.setLanguage(Locale.US)
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+            val r = tts.setLanguage(Locale.US)
+            if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) {
                 statusText.text = "TTS language not supported"
             }
         }
     }
 
     private fun speakText(text: String) {
-        if (::tts.isInitialized) {
-            val chunks = text.chunked(3000)
-            for (chunk in chunks) {
-                tts.speak(chunk, TextToSpeech.QUEUE_ADD, null, UUID.randomUUID().toString())
-            }
+        if (!::tts.isInitialized) return
+        tts.stop()
+        text.chunked(3000).forEach {
+            tts.speak(it, TextToSpeech.QUEUE_ADD, null, UUID.randomUUID().toString())
         }
     }
 
     override fun onDestroy() {
+        if (::tts.isInitialized) { tts.stop(); tts.shutdown() }
         super.onDestroy()
-        if (::tts.isInitialized) {
-            tts.stop()
-            tts.shutdown()
-        }
-        cameraExecutor.shutdown()
     }
-
-    private fun allPermissionsGranted() =
-        ContextCompat.checkSelfPermission(
-            baseContext, Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
-}
-
-// ImageProxy → Bitmap
-fun ImageProxy.toBitmap(): Bitmap {
-    val nv21 = yuv420888ToNv21(this)
-    val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-    val out = ByteArrayOutputStream()
-    yuvImage.compressToJpeg(Rect(0, 0, width, height), 100, out)
-    val imageBytes = out.toByteArray()
-    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-}
-
-private fun yuv420888ToNv21(image: ImageProxy): ByteArray {
-    val yBuffer = image.planes[0].buffer
-    val uBuffer = image.planes[1].buffer
-    val vBuffer = image.planes[2].buffer
-
-    val ySize = yBuffer.remaining()
-    val uSize = uBuffer.remaining()
-    val vSize = vBuffer.remaining()
-
-    val nv21 = ByteArray(ySize + uSize + vSize)
-    yBuffer.get(nv21, 0, ySize)
-    vBuffer.get(nv21, ySize, vSize)
-    uBuffer.get(nv21, ySize + vSize, uSize)
-    return nv21
 }

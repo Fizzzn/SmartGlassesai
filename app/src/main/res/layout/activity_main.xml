@@ -1,36 +1,51 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:gravity="center_horizontal"
-    tools:context=".MainActivity">
+    android:background="#101010">
 
-    <!-- Camera preview -->
-    <androidx.camera.view.PreviewView
-        android:id="@+id/previewView"
+    <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:background="#000" />
-
-    <!-- OCR result text -->
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:padding="16dp"
-        android:text="Smart Glasses App"
-        android:textSize="18sp"
-        android:textColor="@android:color/black" />
+        android:orientation="vertical"
+        android:gravity="center_horizontal"
+        android:padding="24dp">
 
-    <!-- Button to trigger OCR -->
-    <Button
-        android:id="@+id/startButton"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Start OCR"
-        android:layout_margin="16dp" />
+        <!-- ESP snapshot preview -->
+        <ImageView
+            android:id="@+id/espImage"
+            android:layout_width="300dp"
+            android:layout_height="220dp"
+            android:layout_marginBottom="20dp"
+            android:background="@drawable/rounded_bg"
+            android:scaleType="centerCrop"
+            android:contentDescription="ESP Snapshot" />
 
-</LinearLayout>
+        <!-- Status / OCR / AI text -->
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Ready"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:padding="12dp"
+            android:background="#181818"
+            android:layout_marginBottom="24dp" />
+
+        <!-- Main capture button -->
+        <Button
+            android:id="@+id/btnEspCapture"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Capture from Glasses"
+            android:textSize="18sp"
+            android:backgroundTint="#007BFF"
+            android:textColor="#FFFFFF"
+            android:paddingLeft="28dp"
+            android:paddingRight="28dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp" />
+
+    </LinearLayout>
+</ScrollView>
