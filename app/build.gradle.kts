@@ -28,6 +28,9 @@ android {
 
         val apiKey = props.getProperty("GEMINI_API_KEY") ?: ""
         buildConfigField("String", "GEMINI_API_KEY", "\"$apiKey\"")
+
+        val placesKey = props.getProperty("PLACES_API_KEY") ?: ""
+        buildConfigField("String", "PLACES_API_KEY", "\"$placesKey\"")
     }
 
     buildFeatures {
@@ -49,6 +52,9 @@ dependencies {
 
     // HTTP client
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Location library
+    implementation("com.google.android.gms:play-services-location:21.0.1")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")

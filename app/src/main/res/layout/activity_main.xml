@@ -33,6 +33,18 @@
             android:background="#181818"
             android:layout_marginBottom="24dp" />
 
+        <Button
+            android:id="@+id/btnVoiceCommand"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🎤 Speak Command"
+            android:textSize="18sp"
+            android:backgroundTint="#FF5722"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="16dp"
+            android:paddingLeft="24dp"
+            android:paddingRight="24dp" />
+
         <!-- Main capture button -->
         <Button
             android:id="@+id/btnEspCapture"
@@ -46,6 +58,22 @@
             android:paddingRight="28dp"
             android:paddingTop="12dp"
             android:paddingBottom="12dp" />
+
+        <!-- NEW BUTTON: Find Nearby Places -->
+        <Button
+            android:id="@+id/btnFindPlaces"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Find Nearby Places"
+            android:textSize="18sp"
+            android:backgroundTint="#28A745"
+            android:textColor="#FFFFFF"
+            android:layout_marginTop="20dp"
+            android:paddingLeft="28dp"
+            android:paddingRight="28dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp" />
+
 
     </LinearLayout>
 </ScrollView>
