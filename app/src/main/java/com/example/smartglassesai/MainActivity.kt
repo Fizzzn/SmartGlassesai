@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
@@ -12,6 +13,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.ai.client.generativeai.GenerativeModel
+import com.google.ai.client.generativeai.type.content
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -34,7 +36,9 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import android.content.Intent
 import android.speech.RecognizerIntent
 import androidx.activity.result.contract.ActivityResultContracts
+//import androidx.compose.ui.semantics.text
 import org.json.JSONObject
+import java.net.URLEncoder
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -48,6 +52,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var btnFindPlaces: Button
 
     private lateinit var btnVoiceCommand: Button // Add this    // NEW: Handle the result from the Speech Recognizer
+
+    private lateinit var btnRepeat: Button
+    private var lastFoundPlaces: List<JSONObject> = emptyList()
+    private var lastUserLocation: android.location.Location? = null
+    private var lastSpokenText: String = ""
+
     private val speechLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK && result.data != null) {
             val spokenText: ArrayList<String>? = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
@@ -59,6 +69,23 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
     }
+
+    // ... existing speechLauncher ...
+
+    // 👇 NEW: Handle the result from the Camera App
+    private val cameraLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val photo = result.data?.extras?.get("data") as? Bitmap
+            if (photo != null) {
+                espImage.setImageBitmap(photo)
+                statusText.text = "Photo captured. Analyzing..."
+
+                // Optional: Run OCR or Description immediately
+                runTextRecognition(photo)
+            }
+        }
+    }
+
     // NEW: longer timeouts + clearer failure messages
     private val httpClient by lazy {
         OkHttpClient.Builder()
@@ -93,6 +120,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // New Voice Command button
         btnVoiceCommand = findViewById(R.id.btnVoiceCommand)
 
+        btnRepeat = findViewById(R.id.btnRepeat)
+
         // NEW: load & edit ESP base URL
         val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
         ESP_BASE = prefs.getString("esp_base", ESP_BASE)!!
@@ -110,6 +139,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
+        }
+
+        // 👇 NEW: Launch Phone Camera
+        btnEspCapture.setOnClickListener {
+            // Check Camera Permission
+            if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.CAMERA), 103)
+            } else {
+                openCamera()
+            }
         }
 
         // NEW: long-press to probe /net (quick reachability test)
@@ -135,7 +174,85 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         btnVoiceCommand.setOnClickListener { startVoiceInput() }
+
+        // When clicked, say the last text again
+        btnRepeat.setOnClickListener {
+            if (lastSpokenText.isNotEmpty()) {
+                tts.speak(lastSpokenText, TextToSpeech.QUEUE_FLUSH, null, null)
+            }
+        }
     }
+
+    // ... inside MainActivity class ...
+
+    private fun openCamera() {
+        val cameraIntent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
+        try {
+            cameraLauncher.launch(cameraIntent)
+        } catch (e: Exception) {
+            statusText.text = "Error opening camera: ${e.localizedMessage}"
+        }
+    }
+
+    // Update existing permission handler
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        // ... existing code for 101 (Location) ...
+        if (requestCode == 101) {
+            // ... keep existing location logic ...
+        }
+
+        // 👇 NEW: Handle Camera Permission
+        if (requestCode == 103) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                openCamera()
+            } else {
+                statusText.text = "Camera permission needed to take photos."
+            }
+        }
+    }
+
+    private fun runTextRecognition(bitmap: Bitmap) {
+        val image = InputImage.fromBitmap(bitmap, 0)
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+
+        recognizer.process(image)
+            .addOnSuccessListener { visionText ->
+                val resultText = visionText.text
+                if (resultText.isNotBlank()) {
+                    statusText.text = "Read: $resultText"
+                    speakText("I read: $resultText")
+                } else {
+                    statusText.text = "No text found in image."
+                    describeImage(bitmap) // Fallback to AI description
+                }
+            }
+            .addOnFailureListener { e ->
+                statusText.text = "OCR Failed: ${e.localizedMessage}"
+            }
+    }
+
+    private fun describeImage(bitmap: Bitmap) {
+        statusText.text = "Asking Gemini to describe..."
+
+        lifecycleScope.launch {
+            try {
+                val inputPrompt = content {
+                    image(bitmap)
+                    text("Describe this image in one short sentence.")
+                }
+                val response = generativeModel.generateContent(inputPrompt)
+                response.text?.let {
+                    statusText.text = it
+                    speakText(it)
+                }
+            } catch (e: Exception) {
+                statusText.text = "AI Error: ${e.message}"
+            }
+        }
+    }
+
 
     private fun startVoiceInput() {
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -154,6 +271,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun processVoiceCommand(command: String) {
         val lowerCmd = command.lowercase()
 
+        // Check if user is selecting an option (and we have places saved)
+        if (lastFoundPlaces.isNotEmpty() &&
+            (lowerCmd.contains("option") || lowerCmd.contains("number") ||
+                    lowerCmd.contains("first") || lowerCmd.contains("second") || lowerCmd.contains("third") ||
+                    lowerCmd == "one" || lowerCmd == "two" || lowerCmd == "three")) {
+
+            handlePlaceSelection(lowerCmd)
+            return
+        }
+
         // improved logic: Check for intent keywords
         if (lowerCmd.contains("find") || lowerCmd.contains("nearby") || lowerCmd.contains("where is")) {
 
@@ -171,7 +298,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             statusText.text = "Searching map for: $query"
             findNearbyPlaces(query)
+            return
         }
+        // Check for Direct Navigation Intent
+        // Examples: "Directions to Starbucks", "How do I get to home", "Navigate to work"
+        if (lowerCmd.contains("directions to") || lowerCmd.contains("navigate to") || lowerCmd.contains("how do i get to")) {
+            statusText.text = "Getting location for directions..."
+            handleDirectNavigation(command)
+            return
+        }
+
         // If the user just says a noun like "Gas station" or "Coffee", assume it's a search
         else if (lowerCmd.length < 20 && !lowerCmd.contains(" ")) {
             findNearbyPlaces(lowerCmd)
@@ -179,12 +315,22 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         else {
             // General AI Query
             statusText.text = "Asking Gemini..."
-            runGeminiWithoutImage(command)
+            // 👇 CHANGE: Wrap the user's command in a "system instruction" for brevity
+            val briefPrompt = """
+                User Question: "$command"
+                
+                Instructions:
+                1. Answer the question accurately but VERY briefly.
+                2. Keep the response under 3 sentences.
+                3. Use simple, spoken-style language.
+            """.trimIndent()
+
+            runGeminiWithoutImage(briefPrompt)
         }
     }
 
     // Function for handling permission requests
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    /*override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
         if (requestCode == 101) { // 101 matches the request code we used above
@@ -196,7 +342,179 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 statusText.text = "Location permission needed to find places."
             }
         }
+    }*/
+
+    private fun handleDirectNavigation(command: String) {
+        // 1. Check Permissions
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 102)
+            return
+        }
+
+        // 2. Get Location
+        fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+            if (location != null) {
+                // Save location for future context
+                lastUserLocation = location
+
+                statusText.text = "Asking AI for directions..."
+
+                // Clean up the command to get the place name
+                var destinationName = command.lowercase()
+                    .replace("directions to", "")
+                    .replace("navigate to", "")
+                    .replace("how do i get to", "")
+                    .trim()
+
+                if (destinationName.isEmpty()) destinationName = "restaurant"
+
+                lifecycleScope.launch {
+                    // STEP A: Search for the place first to get its exact coordinates
+                    val searchJson = searchGooglePlaces(location.latitude, location.longitude, destinationName)
+
+                    try {
+                        val root = JSONObject(searchJson)
+                        val places = root.optJSONArray("places")
+
+                        if (places != null && places.length() > 0) {
+                            // We found the place! Get its location.
+                            val firstPlace = places.getJSONObject(0)
+                            val realName = firstPlace.getJSONObject("displayName").getString("text")
+                            val placeLoc = firstPlace.getJSONObject("location")
+                            val destLat = placeLoc.getDouble("latitude")
+                            val destLng = placeLoc.getDouble("longitude")
+
+                            statusText.text = "Calculating route to $realName..."
+
+                            // STEP B: Ask for directions using specific coordinates (Lat,Lng)
+                            // This prevents "No route found" errors caused by ambiguous names
+                            val coordinateString = "$destLat,$destLng"
+                            val directionsJson = fetchDirections(location.latitude, location.longitude, coordinateString)
+
+                            processDirectionsResponse(directionsJson, realName)
+                        } else {
+                            statusText.text = "Could not find '$destinationName'"
+                            speakText("I couldn't find a place named $destinationName nearby.")
+                        }
+                    } catch (e: Exception) {
+                        statusText.text = "Error locating place: ${e.message}"
+                    }
+                }
+            } else {
+                statusText.text = "Could not determine location."
+                speakText("I need to know where you are, but I couldn't find your GPS signal.")
+            }
+        }
     }
+
+    // Add this to MainActivity class
+    private suspend fun fetchDirections(originLat: Double, originLng: Double, destAddress: String): String = withContext(Dispatchers.IO) {
+        val apiKey = BuildConfig.PLACES_API_KEY // Ensure this key has Directions API enabled
+        val encodedDest = URLEncoder.encode(destAddress, "utf-8")
+        val url = "https://maps.googleapis.com/maps/api/directions/json?origin=$originLat,$originLng&destination=$encodedDest&mode=walking&key=$apiKey"
+        val request = Request.Builder().url(url).build()
+
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return@withContext "Error: ${response.code}"
+            return@withContext response.body?.string() ?: "Error: No data"
+        }
+    }
+
+    private fun handlePlaceSelection(command: String) {
+        val lowerCmd = command.lowercase()
+        var selectedIndex = -1
+
+        // Figure out which index they want
+        if (lowerCmd.contains("one") || lowerCmd.contains("1") || lowerCmd.contains("first")) selectedIndex = 0
+        else if (lowerCmd.contains("two") || lowerCmd.contains("2") || lowerCmd.contains("second")) selectedIndex = 1
+        else if (lowerCmd.contains("three") || lowerCmd.contains("3") || lowerCmd.contains("third")) selectedIndex = 2
+
+        if (selectedIndex != -1 && selectedIndex < lastFoundPlaces.size) {
+            val place = lastFoundPlaces[selectedIndex]
+            val name = place.getJSONObject("displayName").getString("text")
+
+            // 👇 KEY FIX: Get coordinates directly from the JSON object
+            val placeLoc = place.getJSONObject("location")
+            val destLat = placeLoc.getDouble("latitude")
+            val destLng = placeLoc.getDouble("longitude")
+
+            statusText.text = "Fetching walking directions to $name..."
+
+            // Use stored location for the prompt
+            val userLat = lastUserLocation?.latitude ?: 0.0
+            val userLng = lastUserLocation?.longitude ?: 0.0
+
+            // 👇 NEW LOGIC: Call Directions API
+            lifecycleScope.launch {
+                val coordinateString = "$destLat,$destLng"
+                val directionsJson = fetchDirections(userLat, userLng, coordinateString)
+
+                // Process the result
+                processDirectionsResponse(directionsJson, name)
+            }
+
+            lastFoundPlaces = emptyList()
+        } else {
+            speakText("I didn't understand which option. Please say Option 1, 2, or 3.")
+        }
+    }
+
+    private fun processDirectionsResponse(jsonResponse: String, destinationName: String) {
+        try {
+            val root = JSONObject(jsonResponse)
+            val routes = root.optJSONArray("routes")
+
+            if (routes == null || routes.length() == 0) {
+                statusText.text = "No route found."
+                speakText("I couldn't find a walking route to $destinationName.")
+                return
+            }
+
+            val legs = routes.getJSONObject(0).getJSONArray("legs")
+            val steps = legs.getJSONObject(0).getJSONArray("steps")
+            val duration = legs.getJSONObject(0).getJSONObject("duration").getString("text")
+            val distance = legs.getJSONObject(0).getJSONObject("distance").getString("text")
+
+            val stepsBuilder = StringBuilder()
+            stepsBuilder.append("Route to $destinationName ($distance, $duration):\n")
+
+            // Loop through steps to get specific instructions
+            for (i in 0 until steps.length()) {
+                val step = steps.getJSONObject(i)
+                // Google returns instructions with HTML tags (e.g., <b>Turn Left</b>)
+                // We verify 'html_instructions' exists
+                var instruction = step.getString("html_instructions")
+
+                // Remove HTML tags for plain text
+                instruction = instruction.replace(Regex("<[^>]*>"), "")
+
+                val dist = step.getJSONObject("distance").getString("text")
+                stepsBuilder.append("${i + 1}. $instruction ($dist)\n")
+            }
+
+            val cleanSteps = stepsBuilder.toString()
+            statusText.text = cleanSteps // Show detailed list on screen
+
+            // Ask Gemini to summarize specifically
+            val prompt = """
+                Here are the official walking directions:
+                $cleanSteps
+                
+                Task:
+                1. Tell the user the total time and distance.
+                2. Read the first 3 major turns/instructions clearly.
+                3. If there are many steps, just summarize the rest as "and follow the path to the destination."
+                4. Keep it spoken-style and helpful.
+            """.trimIndent()
+
+            runGeminiWithoutImage(prompt)
+
+        } catch (e: Exception) {
+            statusText.text = "Error parsing directions: ${e.message}"
+            speakText("I found the place, but I couldn't read the map directions.")
+        }
+    }
+
 
     // Function to search Google Places
     private suspend fun searchGooglePlaces(lat: Double, lng: Double, query: String): String = withContext(Dispatchers.IO) {
@@ -260,12 +578,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                     // Error handling
                     if (jsonResponse.startsWith("Error") || jsonResponse.startsWith("Places API Error")) {statusText.text = jsonResponse
+                        statusText.text = jsonResponse
                         speakText("I encountered a technical error.")
                         return@launch
                     }
 
                     // 👇 NEW LOGIC: Parse JSON, calculate distance, and format for Gemini
                     val formattedList = StringBuilder()
+                    val tempPlacesList = mutableListOf<JSONObject>()
+
                     try {
                         val root = JSONObject(jsonResponse)
                         val placesArray = root.optJSONArray("places")
@@ -280,6 +601,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                         for (i in 0 until placesArray.length()) {
                             val place = placesArray.getJSONObject(i)
+                            tempPlacesList.add(place)
                             val name = place.getJSONObject("displayName").getString("text")
                             val address = place.optString("formattedAddress", "Address not available")
 
@@ -293,6 +615,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                             formattedList.append("${i + 1}. $name\n   Distance: $distance\n   Address: $address\n\n")
                         }
 
+                        lastFoundPlaces = tempPlacesList
+                        lastUserLocation = location
+
                     } catch (e: Exception) {
                         statusText.text = "Error parsing places: ${e.message}"
                         return@launch
@@ -302,14 +627,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     statusText.text = formattedList.toString()
 
                     // Send to Gemini to read out politely
+                    // Send to Gemini to read out politely
                     val prompt = """
                         Here is a list of nearby places with distances:
                         $formattedList
                         
-                        Task:
-                        1. Read out the options clearly to the user.
-                        2. Mention the name and the distance for each one.
-                        3. Ask the user which one they would like directions to.
+                        Instructions:
+                        1. Read the options clearly.
+                        2. Mention the name and distance for each.
+                        3. Be extremely concise. Do not add extra commentary.
+                        4. End by asking: "Which one would you like?"
                     """.trimIndent()
 
                     runGeminiWithoutImage(prompt)
@@ -412,7 +739,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun runTextRecognition(bitmap: Bitmap) {
+    /*private fun runTextRecognition(bitmap: Bitmap) {
         val image = InputImage.fromBitmap(bitmap, 0)
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
@@ -449,7 +776,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .addOnFailureListener { e ->
                 statusText.text = "OCR Error: ${e.localizedMessage}"
             }
-    }
+    }*/
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
@@ -461,10 +788,23 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun speakText(text: String) {
-        if (!::tts.isInitialized) return
+        /*if (!::tts.isInitialized) return
         tts.stop()
         text.chunked(3000).forEach {
             tts.speak(it, TextToSpeech.QUEUE_ADD, null, UUID.randomUUID().toString())
+        }*/
+
+        // 1. Save the text so we can repeat it later
+        lastSpokenText = text
+
+        // 2. Ensure UI updates run on the main thread
+        runOnUiThread {            // Reveal the repeat button if it's hidden
+            if (btnRepeat.visibility == View.GONE) {
+                btnRepeat.visibility = View.VISIBLE
+            }
+
+            // 3. Speak the text
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
         }
     }
 
